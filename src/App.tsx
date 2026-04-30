@@ -40,6 +40,7 @@ interface FlowItem {
   videoUrl: string | null;
   status: 'idle' | 'generating' | 'polling' | 'completed' | 'error';
   progress: string;
+  renderDuration?: number;
   error: string | null;
   createdAt: number;
 }
@@ -93,6 +94,7 @@ export default function App() {
     const flowId = targetId || Math.random().toString(36).substr(2, 9);
     const flowToUse = targetId ? flows.find(f => f.id === targetId) : null;
     const flowPrompt = targetId ? (flowToUse?.prompt || '') : newPrompt;
+    const startTime = Date.now();
 
     if (!targetId) {
       const newFlow: FlowItem = {
@@ -124,10 +126,13 @@ export default function App() {
       
       let currentOp = operation;
       while (!currentOp.done) {
-        await new Promise(resolve => setTimeout(resolve, 10000));
+        await new Promise(resolve => setTimeout(resolve, 5000));
         currentOp = await pollVideoOperation(currentOp);
-        updateFlowAction(flowId, { progress: 'Görsel işleniyor...' });
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        updateFlowAction(flowId, { progress: `Görsel işleniyor... (${elapsed}sn)`, renderDuration: elapsed });
       }
+
+      const finalDuration = Math.floor((Date.now() - startTime) / 1000);
 
       if (currentOp.error) {
         throw new Error(currentOp.error?.message?.toString() || "Üretim hatası");
@@ -136,7 +141,7 @@ export default function App() {
       const uri = currentOp.response?.generatedVideos?.[0]?.video?.uri;
       if (uri) {
         const url = await fetchVideoData(uri);
-        updateFlowAction(flowId, { videoUrl: url, status: 'completed', progress: '' });
+        updateFlowAction(flowId, { videoUrl: url, status: 'completed', progress: '', renderDuration: finalDuration });
       }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Beklenmedik bir hata oluştu.";
@@ -185,8 +190,9 @@ export default function App() {
               API Anahtarı Seç
             </button>
           )}
-          <div className="px-4 py-1.5 rounded-md bg-indigo-600/10 border border-indigo-600/20 text-[10px] font-mono text-indigo-400 uppercase tracking-widest">
-            VEO ENGINE v3.1 ACTIVE
+          <div className="px-4 py-1.5 rounded-md bg-green-500/10 border border-green-500/20 text-[10px] font-mono text-green-400 uppercase tracking-widest flex items-center gap-2">
+            <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+            VEO LITE (HIZLI & EKONOMİK)
           </div>
         </div>
       </nav>
@@ -209,32 +215,39 @@ export default function App() {
               </div>
             ) : (
               flows.map(flow => (
-                <button
+                <div
                   key={flow.id}
                   onClick={() => setActiveFlowId(flow.id)}
-                  className={`w-full text-left p-4 rounded-xl transition-all border group relative ${
+                  className={`w-full text-left p-4 rounded-xl transition-all border group relative cursor-pointer ${
                     activeFlowId === flow.id 
                     ? 'bg-indigo-600/10 border-indigo-500/30' 
                     : 'bg-white/5 border-transparent hover:bg-white/10'
                   }`}
                 >
                   <div className="flex justify-between items-start mb-2">
-                    <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
-                      flow.status === 'completed' ? 'bg-green-500/20 text-green-400' : 
-                      flow.status === 'error' ? 'bg-red-500/20 text-red-400' :
-                      'bg-indigo-500/20 text-indigo-400 animate-pulse'
-                    }`}>
-                      {flow.status.toUpperCase()}
-                    </span>
+                    <div className="flex flex-col gap-1">
+                      <span className={`text-[10px] w-fit px-2 py-0.5 rounded font-mono ${
+                        flow.status === 'completed' ? 'bg-green-500/20 text-green-400' : 
+                        flow.status === 'error' ? 'bg-red-500/20 text-red-400' :
+                        'bg-indigo-500/20 text-indigo-400 animate-pulse'
+                      }`}>
+                        {flow.status.toUpperCase()}
+                      </span>
+                      {flow.renderDuration && (
+                        <span className="text-[10px] text-white/30 font-mono">
+                          SÜRE: {flow.renderDuration}sn
+                        </span>
+                      )}
+                    </div>
                     <button 
                       onClick={(e) => { e.stopPropagation(); removeFlow(flow.id); }}
-                      className="opacity-0 group-hover:opacity-60 hover:!opacity-100 p-1 rounded-md hover:bg-red-500/20 text-red-400 transition-all"
+                      className="opacity-0 group-hover:opacity-60 hover:!opacity-100 p-1 rounded-md hover:bg-red-500/20 text-red-400 transition-all focus:outline-none"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                   <p className="text-xs line-clamp-2 text-white/70 font-medium leading-relaxed">{flow.prompt}</p>
-                </button>
+                </div>
               ))
             )}
           </div>

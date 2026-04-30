@@ -32,24 +32,30 @@ export async function generateFlowVideo({
     numberOfVideos: 1,
     resolution,
     aspectRatio,
+    includeAudio: false,
+  };
+
+  const getMimeType = (base64: string) => {
+    const match = base64.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+    return match ? match[1] : "image/private";
   };
 
   if (endImageBase64) {
     config.lastFrame = {
       imageBytes: endImageBase64.split(",")[1] || endImageBase64,
-      mimeType: "image/png",
+      mimeType: getMimeType(endImageBase64) || "image/png",
     };
   }
 
-  // Choose model
+  // Use Lite model for speed and lower cost
   const model = resolution === VideoResolution.R_4K ? "veo-3.1-generate-preview" : "veo-3.1-lite-generate-preview";
 
   let operation = await ai.models.generateVideos({
     model,
-    prompt: prompt || "A cinematic transition between these two images",
+    prompt: `${prompt || "A cinematic transition between these two images"}. Strict: No music, no sound, purely visual animation.`,
     image: startImageBase64 ? {
       imageBytes: startImageBase64.split(",")[1] || startImageBase64,
-      mimeType: "image/png",
+      mimeType: getMimeType(startImageBase64) || "image/png",
     } : undefined,
     config,
   });
