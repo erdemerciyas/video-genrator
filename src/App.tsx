@@ -48,7 +48,10 @@ interface FlowItem {
 export default function App() {
   const [startImage, setStartImage] = useState<string | null>(null);
   const [endImage, setEndImage] = useState<string | null>(null);
-  const [flows, setFlows] = useState<FlowItem[]>([]);
+  const [flows, setFlows] = useState<FlowItem[]>(() => {
+    const saved = localStorage.getItem('flowvision_flows');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [activeFlowId, setActiveFlowId] = useState<string | null>(null);
   const [newPrompt, setNewPrompt] = useState('');
   const [hasApiKey, setHasApiKey] = useState(false);
@@ -60,6 +63,14 @@ export default function App() {
   useEffect(() => {
     checkApiKey();
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('flowvision_flows', JSON.stringify(flows));
+    } catch (e) {
+      console.warn("Storage error:", e);
+    }
+  }, [flows]);
 
   const checkApiKey = async () => {
     if (window.aistudio) {
@@ -81,19 +92,79 @@ export default function App() {
     setFlows(prev => prev.map(f => f.id === id ? { ...f, ...updates } : f));
   };
 
+  const [videoCache, setVideoCache] = useState<Record<string, { url: string, duration: number }>>(() => {
+    const saved = localStorage.getItem('flowvision_video_cache');
+    return saved ? JSON.parse(saved) : {};
+  });
+  const [fileUriCache, setFileUriCache] = useState<Record<string, { uri: string, mimeType: string }>>(() => {
+    const saved = localStorage.getItem('flowvision_uri_cache');
+    return saved ? JSON.parse(saved) : {};
+  });
+  const [useSameImage, setUseSameImage] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem('flowvision_video_cache', JSON.stringify(videoCache));
+  }, [videoCache]);
+
+  useEffect(() => {
+    localStorage.setItem('flowvision_uri_cache', JSON.stringify(fileUriCache));
+  }, [fileUriCache]);
+
+  const getImgHash = (base64: string | null) => base64 ? base64.slice(-100) : '';
+
+  const generateCacheKey = (start: string | null, end: string | null, p: string) => {
+    const s = getImgHash(start);
+    const e = useSameImage ? s : getImgHash(end);
+    return `${s}_${e}_${p.trim().toLowerCase()}`;
+  };
+
   const handleGenerate = async (targetId?: string) => {
     if (!hasApiKey) {
       setGlobalError("Lütfen önce bir API anahtarı seçin.");
       return;
     }
-    if (!startImage || !endImage) {
-      setGlobalError("Lütfen hem başlangıç hem de bitiş referans görsellerini ekleyin.");
+    
+    const finalStartImage = startImage;
+    const finalEndImage = useSameImage ? startImage : endImage;
+
+    if (!finalStartImage || !finalEndImage) {
+      setGlobalError("Lütfen gerekli referans görsellerini ekleyin.");
       return;
     }
 
     const flowId = targetId || Math.random().toString(36).substr(2, 9);
     const flowToUse = targetId ? flows.find(f => f.id === targetId) : null;
     const flowPrompt = targetId ? (flowToUse?.prompt || '') : newPrompt;
+    
+    // Önbellek kontrolü
+    const cacheKey = generateCacheKey(finalStartImage, finalEndImage, flowPrompt);
+    if (videoCache[cacheKey]) {
+      const cached = videoCache[cacheKey];
+      if (!targetId) {
+        const newFlow: FlowItem = {
+          id: flowId,
+          prompt: flowPrompt,
+          videoUrl: cached.url,
+          status: 'completed',
+          progress: '',
+          renderDuration: cached.duration,
+          createdAt: Date.now(),
+          error: null
+        };
+        setFlows(prev => [newFlow, ...prev]);
+        setActiveFlowId(flowId);
+        setNewPrompt('');
+      } else {
+        updateFlowAction(flowId, { 
+          videoUrl: cached.url, 
+          status: 'completed', 
+          renderDuration: cached.duration,
+          error: null 
+        });
+      }
+      return;
+    }
+
     const startTime = Date.now();
 
     if (!targetId) {
@@ -102,7 +173,7 @@ export default function App() {
         prompt: flowPrompt,
         videoUrl: null,
         status: 'generating',
-        progress: 'Başlatılıyor...',
+        progress: 'Hazırlanıyor...',
         error: null,
         createdAt: Date.now()
       };
@@ -114,19 +185,41 @@ export default function App() {
     }
 
     try {
+      // Optimizasyon: Görselleri önceden yükle veya önbellekten kullan
+      const startHash = getImgHash(finalStartImage);
+      const endHash = getImgHash(finalEndImage);
+      
+      let startFileInfo = fileUriCache[startHash];
+      let endFileInfo = fileUriCache[endHash];
+
+      if (!startFileInfo && finalStartImage) {
+        updateFlowAction(flowId, { progress: 'Başlangıç görseli işleniyor...' });
+        startFileInfo = await import('./services/geminiService').then(m => m.uploadImage(finalStartImage));
+        setFileUriCache(prev => ({ ...prev, [startHash]: startFileInfo }));
+      }
+
+      if (!endFileInfo && finalEndImage) {
+        updateFlowAction(flowId, { progress: 'Bitiş görseli işleniyor...' });
+        endFileInfo = await import('./services/geminiService').then(m => m.uploadImage(finalEndImage));
+        setFileUriCache(prev => ({ ...prev, [endHash]: endFileInfo }));
+      }
+
       const operation = await generateFlowVideo({
         prompt: flowPrompt,
-        startImageBase64: startImage,
-        endImageBase64: endImage,
+        startFileUri: startFileInfo?.uri,
+        startMimeType: startFileInfo?.mimeType,
+        endFileUri: endFileInfo?.uri,
+        endMimeType: endFileInfo?.mimeType,
         resolution: VideoResolution.R_720P,
-        aspectRatio: VideoAspectRatio.AR_16_9
+        aspectRatio: VideoAspectRatio.AR_16_9,
+        includeAudio: false
       });
 
       updateFlowAction(flowId, { status: 'polling', progress: 'Video üretiliyor...' });
       
       let currentOp = operation;
       while (!currentOp.done) {
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 10000));
         currentOp = await pollVideoOperation(currentOp);
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         updateFlowAction(flowId, { progress: `Görsel işleniyor... (${elapsed}sn)`, renderDuration: elapsed });
@@ -138,10 +231,37 @@ export default function App() {
         throw new Error(currentOp.error?.message?.toString() || "Üretim hatası");
       }
 
-      const uri = currentOp.response?.generatedVideos?.[0]?.video?.uri;
+      const response = currentOp.response;
+      const videoResult = response?.generatedVideos?.[0]?.video || (response as any)?.video || (response as any)?.generatedVideo?.video;
+      const uri = videoResult?.uri;
+      
       if (uri) {
         const url = await fetchVideoData(uri);
         updateFlowAction(flowId, { videoUrl: url, status: 'completed', progress: '', renderDuration: finalDuration });
+        
+        // Önbelleğe kaydet
+        const finalCacheKey = generateCacheKey(finalStartImage, finalEndImage, flowPrompt);
+        setVideoCache(prev => ({
+          ...prev,
+          [finalCacheKey]: { url, duration: finalDuration }
+        }));
+      } else {
+        console.error("Full Operation Object:", currentOp);
+        let detail = "Bilinmeyen bir hata oluştu.";
+        if (currentOp.error) {
+          detail = `Model Hatası: ${currentOp.error.message}`;
+        } else if (response?.raiMediaFilteredReasons?.length) {
+          const filterMsg = response.raiMediaFilteredReasons.join(", ");
+          detail = `Güvenlik/Filtre: ${filterMsg}`;
+          if (filterMsg.includes("audio")) {
+            detail += "\n\n⚠️ İpucu: AI bazen prompt'un müzik içerdiğini düşünerek video üretmeyi durdurur. Lütfen 'müzik', 'ses' gibi kelimeleri prompt'unuzdan çıkarmayı deneyin.";
+          }
+        } else if (!response) {
+          detail = "Model yanıtı boş (Güvenlik filtreleri tetiklenmiş olabilir).";
+        } else {
+          detail = "Video verisi (URI) yanıt içinde bulunamadı.";
+        }
+        throw new Error(`Video oluşturulamadı. ${detail}`);
       }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Beklenmedik bir hata oluştu.";
@@ -252,7 +372,7 @@ export default function App() {
             )}
           </div>
 
-          <div className="p-4 bg-black/20 border-t border-white/5">
+          <div className="p-4 bg-black/20 border-t border-white/5 space-y-3">
             <div className="relative">
               <textarea 
                 value={newPrompt}
@@ -262,14 +382,14 @@ export default function App() {
               />
               <button 
                 onClick={() => handleGenerate()}
-                disabled={!newPrompt.trim() || !startImage || !endImage || hasApiKey === false || flows.some(f => f.status === 'generating' || f.status === 'polling')}
+                disabled={!newPrompt.trim() || !startImage || (!useSameImage && !endImage) || hasApiKey === false || flows.some(f => f.status === 'generating' || f.status === 'polling')}
                 className="absolute bottom-3 right-3 p-2 bg-indigo-600 rounded-lg hover:bg-indigo-500 transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-lg"
               >
                 <ArrowRight className="w-4 h-4 text-white" />
               </button>
             </div>
             {globalError && (
-              <p className="text-[10px] text-red-400 mt-2 text-center">{globalError}</p>
+              <p className="text-[10px] text-red-400 mt-2 text-center leading-relaxed px-4">{globalError}</p>
             )}
           </div>
         </aside>
@@ -346,6 +466,18 @@ export default function App() {
           <p className="text-[10px] text-white/30 mb-8 leading-relaxed">Siz değiştirene kadar tüm videolar bu iki görsel arasında akış oluşturacaktır.</p>
           
           <div className="space-y-8">
+            <div className="px-1 flex items-center justify-between">
+              <span className="text-[9px] text-white/30 uppercase font-bold tracking-tighter">Görsel Kontrolü</span>
+              <button 
+                onClick={() => setUseSameImage(!useSameImage)}
+                className={`text-[9px] px-2 py-0.5 rounded border transition-all ${
+                  useSameImage ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-400' : 'bg-white/5 border-white/10 text-white/30'
+                }`}
+              >
+                {useSameImage ? 'GÖRSEL AYNI ✓' : 'FARKLI GÖRSELLER'}
+              </button>
+            </div>
+
             {/* Start Reference */}
             <div className="space-y-3">
               <div className="flex justify-between items-center">
@@ -381,33 +513,35 @@ export default function App() {
             </div>
 
             {/* End Reference */}
-            <div className="space-y-3">
-              <div className="flex justify-between items-center">
-                <span className="text-xs font-medium text-white/70">Bitiş Sahnesi</span>
-                <button 
+            {!useSameImage && (
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-medium text-white/70">Bitiş Sahnesi</span>
+                  <button 
+                    onClick={() => endInputRef.current?.click()}
+                    className="text-[10px] text-indigo-400 hover:underline"
+                  >
+                    {endImage ? 'Değiştir' : 'Yükle'}
+                  </button>
+                </div>
+                <div 
                   onClick={() => endInputRef.current?.click()}
-                  className="text-[10px] text-indigo-400 hover:underline"
+                  className={`aspect-video w-full rounded-lg bg-[#1A1A1A] border-2 transition-all cursor-pointer relative overflow-hidden group flex items-center justify-center ${
+                    endImage ? 'border-indigo-500/50' : 'border-white/5 border-dashed hover:border-white/20'
+                  }`}
                 >
-                  {endImage ? 'Değiştir' : 'Yükle'}
-                </button>
+                  {endImage ? (
+                    <>
+                      <div className="absolute inset-0 bg-indigo-600/10 pointer-events-none"></div>
+                      <img src={endImage} alt="End" className="w-full h-full object-cover" />
+                    </>
+                  ) : (
+                    <ImageIcon className="w-6 h-6 text-white/10" />
+                  )}
+                </div>
+                <input ref={endInputRef} type="file" accept="image/*" onChange={(e) => handleImageUpload(e, 'end')} className="hidden" />
               </div>
-              <div 
-                onClick={() => endInputRef.current?.click()}
-                className={`aspect-video w-full rounded-lg bg-[#1A1A1A] border-2 transition-all cursor-pointer relative overflow-hidden group flex items-center justify-center ${
-                  endImage ? 'border-indigo-500/50' : 'border-white/5 border-dashed hover:border-white/20'
-                }`}
-              >
-                {endImage ? (
-                  <>
-                    <div className="absolute inset-0 bg-indigo-600/10 pointer-events-none"></div>
-                    <img src={endImage} alt="End" className="w-full h-full object-cover" />
-                  </>
-                ) : (
-                  <ImageIcon className="w-6 h-6 text-white/10" />
-                )}
-              </div>
-              <input ref={endInputRef} type="file" accept="image/*" onChange={(e) => handleImageUpload(e, 'end')} className="hidden" />
-            </div>
+            )}
           </div>
         </aside>
       </div>
