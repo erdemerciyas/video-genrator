@@ -1,0 +1,6 @@
+{
+  "name": "FlowVision",
+  "description": "Generate seamless video transitions between two reference images using Gemini Veo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
